@@ -71,14 +71,37 @@ function get_firebase_project() {
 		local config_project_id=$(get_config_project_id)
 		if [[ -n $config_project_id ]]
 		then
-			echo "$config_project_id"
+			# Show the selected env (alias) when one is set, e.g. "firebase use staging"
+			local project_alias=$(get_firebase_env "$config_project_id")
+			local out=${project_alias:-$config_project_id}
 
-		# If nothing in the firebase config file, use the default value set in .firebaserc
-		else
-			local firebaserc_project_id=$(get_rc_project_id "default")
-			echo "$firebaserc_project_id"
+			# At the project root: append modules whose env differs from the root's
+			if [[ $(pwd -P) == $(get_firebase_dir) ]]
+			then
+				local modules_diff=$(get_modules_env_diff "$out")
+				[[ -n $modules_diff ]] && out="$out $modules_diff"
+			fi
+
+			echo "$out"
 		fi
-	fi	
+		# No explicit "firebase use" selection -> show nothing
+	fi
+}
+
+function get_modules_env_diff() {
+	local root_env=$1
+	local root=$(get_firebase_dir)
+
+	sed -n '/"activeProjects"[[:space:]]*:[[:space:]]*{/,/^[[:space:]]*}/p' ~/.config/configstore/firebase-tools.json \
+		| grep -Eos "\"$root/[^\"]+\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+		| awk -F'"' -v root_env="$root_env" '{
+				n = split($2, a, "/")
+				module = a[n]
+				if ($4 != root_env && !seen[module]++) {
+					out = out (out ? " " : "") module ":" $4
+				}
+			}
+			END { print out }'
 }
 
 function is_firebase_project() {
@@ -99,7 +122,7 @@ function get_firebase_dir() {
 
 		if [[ -e $target ]]
 		then
-				echo $dir
+				echo ${dir:A}
 				break
 		else
 				dir=$(dirname ${dir:A})
@@ -111,12 +134,24 @@ function get_config_project_id() {
 	if [[ -e ~/.config/configstore/firebase-tools.json ]]
 	then
 		# May be either the project id itself or an alias (which lives in .firebaserc)
+		# Scope to the activeProjects block: other sections (activeAccounts, etc.) reuse dir keys
 		local target=$(get_firebase_dir)
-		echo $(grep -s $target ~/.config/configstore/firebase-tools.json | cut -d'"' -f 4)
+		sed -n '/"activeProjects"[[:space:]]*:[[:space:]]*{/,/^[[:space:]]*}/p' ~/.config/configstore/firebase-tools.json \
+			| grep -Eos "\"$target\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
+			| head -n 1 | cut -d'"' -f 4
 	fi
 }
 
-function get_rc_project_id() {
+function get_firebase_env() {
 	local rc_path="$(get_firebase_dir)/.firebaserc"
-	echo $(grep $1 $rc_path | cut -d'"' -f 4)
+
+	# The active selection may be an alias itself (e.g. "firebase use staging")
+	if grep -qs "\"$1\"[[:space:]]*:" "$rc_path"
+	then
+		echo "$1"
+		return
+	fi
+
+	# Otherwise, resolve the alias that points to this project id
+	grep -Eos "\"[^\"]+\"[[:space:]]*:[[:space:]]*\"$1\"" "$rc_path" | head -n 1 | cut -d'"' -f 2
 }
